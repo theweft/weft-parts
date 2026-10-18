@@ -1,6 +1,6 @@
 [package]
 name = "weft-parts"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2024"
 rust-version = "1.99"
 license = "MIT"
@@ -8,6 +8,8 @@ description = "Machine-readable chip data (pinouts, address straps, device tree 
 repository = "https://github.com/theweft/weft-parts"
 homepage = "https://theweft.org"
 readme = "README.md"
+# Published files only: no CI, Nix or editor configuration.
+include = ["src/**", "tests/**", "chips/**", "README.md", "SECURITY.md", "LICENSE", "LICENSES/**"]
 keywords = ["i2c", "device-tree", "simulation", "embedded-hal", "pcb"]
 categories = ["embedded", "simulation", "development-tools::testing"]
 

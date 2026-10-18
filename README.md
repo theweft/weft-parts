@@ -1,5 +1,7 @@
 # weft-parts
 
+> **Status: experimental (0.0.x).** APIs and formats change without notice. Not for production use yet.
+
 Machine-readable chip data and behavioural chip models, part of [weft](https://theweft.org).
 One TOML file per chip under [chips/](chips/) serves three jobs:
 
