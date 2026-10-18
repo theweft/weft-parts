@@ -1,0 +1,31 @@
+# Texas Instruments ADS1115: 16-bit, 4-channel delta-sigma ADC with PGA and comparator.
+name = "TI ADS1115"
+datasheet = "https://www.ti.com/lit/ds/symlink/ads1115.pdf"
+bus = "i2c"
+
+# ADDR pin connects to GND, VDD, SDA or SCL (datasheet table "ADDR Pin Connection").
+[address]
+kind = "strap"
+pin = "addr"
+levels = { gnd = 0x48, vdd = 0x49, sda = 0x4a, scl = 0x4b }
+
+[devicetree]
+compatible = ["ti,ads1115"]
+binding = "Documentation/devicetree/bindings/iio/adc/ti,ads1015.yaml"
+driver = "drivers/iio/adc/ti-ads1015.c"
+# Overlay property -> pin role.
+gpios = { interrupts = "alert" }
+
+[[package]]
+name = "VSSOP-10"
+mpn = ["ADS1115IDGS"]
+pins = { addr = "1", alert = "2", gnd = "3", ain0 = "4", ain1 = "5", ain2 = "6", ain3 = "7", vdd = "8", sda = "9", scl = "10" }
+
+[sim]
+model = "ads1115"
+covers = [
+  "pointer, conversion, config, lo_thresh and hi_thresh registers with reset values",
+  "single-shot (OS bit) and continuous conversion",
+  "input multiplexer and programmable gain amplifier",
+]
+missing = ["comparator and the ALERT/RDY pin", "conversion time: conversions complete instantly"]

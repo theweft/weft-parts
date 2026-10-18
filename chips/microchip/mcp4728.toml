@@ -1,0 +1,32 @@
+# Microchip MCP4728: 12-bit, 4-channel DAC with EEPROM and internal 2.048 V reference.
+name = "Microchip MCP4728"
+datasheet = "https://www.microchip.com/en-us/product/mcp4728"
+bus = "i2c"
+
+# Address bits A2..A0 live in EEPROM; 0x60 is the factory default. They change only through a
+# command sequence that toggles LDAC, so the board alone cannot tell the address.
+[address]
+kind = "fixed"
+value = 0x60
+
+[devicetree]
+compatible = ["microchip,mcp4728"]
+binding = "Documentation/devicetree/bindings/iio/dac/microchip,mcp4728.yaml"
+driver = "drivers/iio/dac/mcp4728.c"
+
+[[package]]
+name = "MSOP-10"
+mpn = ["MCP4728"]
+pins = { vdd = "1", scl = "2", sda = "3", ldac = "4", rdy = "5", vouta = "6", voutb = "7", voutc = "8", voutd = "9", gnd = "10" }
+
+[sim]
+model = "mcp4728"
+covers = [
+  "fast write, multi-write, sequential write, single write",
+  "voltage reference, gain and power-down select commands",
+  "24-byte register read (input registers and EEPROM)",
+  "input versus output registers: UDAC bit, LDAC pin and general call software update",
+  "general call reset (loads EEPROM) and wake-up",
+  "output voltage from VDD or the internal reference",
+]
+missing = ["write and read address bits commands", "EEPROM write time: RDY is always ready"]

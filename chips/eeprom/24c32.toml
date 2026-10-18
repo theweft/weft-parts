@@ -1,0 +1,30 @@
+# 24C32 serial EEPROM: 4 KiB, 32-byte pages, 2-byte memory address. Same pinout and protocol
+# across vendors in 8-pin packages.
+name = "24C32 EEPROM"
+datasheet = "https://www.microchip.com/en-us/product/24LC32A"
+bus = "i2c"
+
+[address]
+kind = "bits"
+base = 0x50
+pins = ["a2", "a1", "a0"]
+
+[devicetree]
+compatible = ["atmel,24c32"]
+binding = "Documentation/devicetree/bindings/eeprom/at24.yaml"
+driver = "drivers/nvmem/at24.c"
+
+[[package]]
+name = "8-pin SOIC/TSSOP/MSOP/DIP"
+# Not the SOT-23-5 variants: different pinout and fewer address pins.
+mpn = ["24LC32A", "24AA32A", "AT24C32", "CAT24C32", "M24C32"]
+pins = { a0 = "1", a1 = "2", a2 = "3", gnd = "4", sda = "5", scl = "6", wp = "7", vdd = "8" }
+
+[sim]
+model = "at24"
+params = { size = 4096, page = 32 }
+covers = [
+  "2-byte memory address, sequential reads wrapping at the end of memory",
+  "page writes wrapping within the 32-byte page",
+]
+missing = ["write cycle time (no NACK while writing)", "the WP pin"]
