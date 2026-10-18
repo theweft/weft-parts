@@ -13,6 +13,8 @@
 //!    covers. The models run behind Linux-style transfers or the embedded-hal `I2c` trait.
 //!
 //! See [`Library`] to load and look up chips, and [`sim::I2cBus`] to run models.
+#![doc(html_logo_url = "https://theweft.org/brand/repos/weft-parts.svg")]
+#![doc(html_favicon_url = "https://theweft.org/favicon.svg")]
 
 pub mod chip;
 pub mod library;

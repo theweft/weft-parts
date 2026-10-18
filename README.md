@@ -1,4 +1,4 @@
-# weft-parts
+<h1><img src="https://theweft.org/brand/repos/weft-parts.svg" alt="" width="44" height="44" align="absmiddle"> weft-parts</h1>
 
 > **Status: experimental (0.0.x).** APIs and formats change without notice. Not for production use yet.
 
