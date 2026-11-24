@@ -9,7 +9,10 @@ One TOML file per chip under [chips/](chips/) serves three jobs:
 |---|---|---|
 | Check PCB wiring | packages, part numbers, pinouts, address straps | [weft-boardchecker](https://github.com/theweft/weft-boardchecker) against IPC-2581 netlists |
 | Check device trees | compatible strings, Linux binding and driver, GPIO property to pin | weft-boardchecker; [dt-schema](https://github.com/devicetree-org/dt-schema) validates against the binding itself |
-| Simulate the chip | behavioural model behind I2C transfers | Linux drivers ([weft-sim](https://github.com/theweft/weft-sim)), Rust MCU drivers via embedded-hal, unit tests |
+| Simulate the chip | behavioural model behind I2C transfers and on its pins' nets | Linux drivers ([weft-sim](https://github.com/theweft/weft-sim)), Rust MCU drivers via embedded-hal, board simulation, unit tests |
+
+It also holds the tool-neutral board model (`board`: components, values, fields, pin to net) that
+weft-boardchecker and the board simulation share, with a KiCad netlist importer.
 
 "Digital twin" is close; "behavioural model" or "bus-level model" is the usual term in
 simulation. The models answer the bus traffic the way the chip does, take the time the chip
@@ -19,9 +22,9 @@ takes, and expose analog inputs and outputs to the test. They do not model elect
 
 | Chip | Packages | Model covers | Model does not cover |
 |---|---|---|---|
-| TI ADS1115 ADC | VSSOP-10 | registers, single-shot and continuous conversion, MUX, PGA, conversion time 1/DR with optional rate deviation, wake-up, comparator and ALERT/RDY (including SMBus alert response) | pins on simulated nets |
-| Microchip MCP4728 DAC | MSOP-10 | all write commands except address bits, register read, LDAC/UDAC/general call, output voltage, EEPROM write time with RDY/BSY | address bit commands, pins on simulated nets |
-| 24C32 EEPROM | 8-pin SOIC/TSSOP/MSOP/DIP | addressing, page writes, sequential reads, write cycle (NACK until t_WR ends), WP pin | pins on simulated nets |
+| TI ADS1115 ADC | VSSOP-10 | registers, single-shot and continuous conversion, MUX, PGA, conversion time 1/DR with optional rate deviation, wake-up, comparator and ALERT/RDY (including SMBus alert response) | |
+| Microchip MCP4728 DAC | MSOP-10 | all write commands except address bits, register read, LDAC/UDAC/general call, output voltage, EEPROM write time with RDY/BSY | address bit commands |
+| 24C32 EEPROM | 8-pin SOIC/TSSOP/MSOP/DIP | addressing, page writes, sequential reads, write cycle (NACK until t_WR ends), WP pin | |
 
 Each model is tested with an independent open-source Rust driver for the chip (`ads1x1x`,
 `mcp4728`, `eeprom24x`) and with the byte sequences the Linux driver sends.
@@ -104,9 +107,9 @@ clock.advance(Duration::from_millis(5));
 assert!(bus.transfer(0x50, &mut [Message::Write(&[])]).is_ok());
 ```
 
-Pins that are not on the bus (ALERT/RDY, RDY/BSY, LDAC, WP) are read and driven through each
-model's methods (`alert_pulls_low`, `rdy_pulls_low`, `set_ldac`, `set_wp`) until simulated nets
-exist (weft-design docs/21). A read from the SMBus alert response address (`ALERT_RESPONSE`)
+Pins that are not on the bus (ALERT/RDY, RDY/BSY, LDAC, WP) sit on simulated nets in a board
+simulation (below); without one, the models' methods (`alert_pulls_low`, `rdy_pulls_low`,
+`set_ldac`, `set_wp`) do the same. A read from the SMBus alert response address (`ALERT_RESPONSE`)
 returns the lowest alerting address, as on the wire. Through embedded-hal, errors say whether the
 address or a data byte was not acknowledged.
 
@@ -116,6 +119,38 @@ fixed origin, so long runs do not drift. `next_event` tells a scheduler when a m
 on its own.
 
 `sim::build` creates the model a chip file names, so a backend can attach chips by part number.
+
+## Boards and nets
+
+`sim::BoardSim` simulates a whole board from its netlist (weft-design docs/21):
+
+- every component whose part number has chip data with a model becomes a model;
+- components on the same SDA and SCL nets share a bus; addresses come from the strap wiring
+  (`board::address`, the rule weft-boardchecker uses);
+- model pins besides the bus (`I2cTarget::pins`) connect to their nets. Nets resolve by wired
+  logic (open-drain low wins, push-pull high against low is contention, pulls decide otherwise);
+  pulls come from resistors to a rail (resistor networks only, no capacitors);
+- nets settle after every transfer, at every model event and when a test drives a net. Each
+  change is an `Edge` with its time; floating inputs, contention and fights against a rail are
+  `Finding`s.
+
+```rust
+use weft_parts::{Library, board::{Rails, kicad}};
+use weft_parts::sim::{BoardSim, Drive, Message, NetState, VirtualClock};
+
+let board = kicad::parse(&std::fs::read_to_string("hat.net")?, &[])?; // kicad-cli sch export netlist
+let library = Library::builtin()?;
+let rails = Rails::from_parts(&board, &library);             // the chips' gnd and vdd nets
+let mut sim = BoardSim::new(&board, &library, &rails, VirtualClock::new())?;
+
+sim.transfer("SDA", 0x60, &mut [Message::Write(&[0x58, 0x08, 0x00])])?; // DAC: write EEPROM
+assert_eq!(sim.net("RDY"), Some(NetState::Low));                       // busy, on the net
+sim.drive("EEPROM_WP", Drive::High);                                     // the host protects
+```
+
+Nets are named by label (`SDA` finds KiCad's `/SDA`). `kicad::parse` takes the part number from
+the first non-empty field among those given (default: `MPN` and common variants); `just
+kicad-real` checks the importer against the official CM5 IO Board export.
 
 ## Adding a chip
 

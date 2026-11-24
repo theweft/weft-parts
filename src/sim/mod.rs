@@ -23,9 +23,11 @@
 
 mod ads1115;
 mod at24;
+mod board;
 #[cfg(feature = "embedded-hal")]
 mod hal;
 mod mcp4728;
+mod net;
 mod time;
 
 use std::any::Any;
@@ -34,9 +36,11 @@ use std::time::Duration;
 
 pub use ads1115::Ads1115;
 pub use at24::At24;
+pub use board::{BoardSim, Edge, Finding};
 #[cfg(feature = "embedded-hal")]
 pub use hal::HalNack;
 pub use mcp4728::{Channel as Mcp4728Channel, Mcp4728};
+pub use net::{Drive, NetState, PinDir, Pull, resolve};
 pub use time::{Clock, ClockDomain, HostClock, SimTime, VirtualClock};
 
 use crate::chip::Sim;
@@ -97,6 +101,20 @@ pub trait I2cTarget: Any + Send {
     }
     /// This target won an SMBus alert response; it clears a latched alert.
     fn smbus_alert_answered(&mut self) {}
+    /// Pins besides the bus that the model reads or drives, by role in the chip file
+    /// (`alert`, `ldac`, `wp`). A [`BoardSim`] connects them to the board's nets.
+    fn pins(&self) -> &'static [(&'static str, PinDir)] {
+        &[]
+    }
+    /// How the model drives output pin `role` now.
+    fn pin_drive(&self, role: &str) -> Drive {
+        let _ = role;
+        Drive::Released
+    }
+    /// The net on input pin `role` settled to `state` (the model was advanced to the time first).
+    fn pin_input(&mut self, role: &str, state: NetState) {
+        let _ = (role, state);
+    }
 }
 
 /// An SPI target at byte level. No SPI models exist yet; the trait fixes the shape for them.
@@ -269,6 +287,19 @@ impl I2cBus {
         }
         self.targets.insert(address, target);
         Ok(())
+    }
+
+    /// The model at `address`, whatever its type.
+    pub fn target_dyn(&self, address: u16) -> Option<&dyn I2cTarget> {
+        self.targets.get(&address).map(AsRef::as_ref)
+    }
+
+    /// The model at `address`, whatever its type.
+    pub fn target_dyn_mut(&mut self, address: u16) -> Option<&mut dyn I2cTarget> {
+        match self.targets.get_mut(&address) {
+            Some(target) => Some(target.as_mut()),
+            None => None,
+        }
     }
 
     /// The model at `address`, if it is a `T`.

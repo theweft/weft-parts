@@ -17,7 +17,7 @@
 
 use std::time::Duration;
 
-use super::{I2cTarget, Nack, SimTime};
+use super::{I2cTarget, Nack, NetState, PinDir, SimTime};
 
 /// Default write cycle time `t_WR`.
 const DEFAULT_WRITE_CYCLE: Duration = Duration::from_millis(5);
@@ -87,6 +87,20 @@ impl At24 {
 }
 
 impl I2cTarget for At24 {
+    fn pins(&self) -> &'static [(&'static str, PinDir)] {
+        &[("wp", PinDir::Input)]
+    }
+
+    /// WP must be tied to VSS or VCC (datasheet §2.4): an undefined level keeps the last one; the
+    /// board simulation reports the floating input.
+    fn pin_input(&mut self, role: &str, state: NetState) {
+        if role == "wp"
+            && let Some(high) = state.level()
+        {
+            self.wp_high = high;
+        }
+    }
+
     fn advance(&mut self, now: SimTime) {
         self.now = self.now.max(now);
         if self.busy_until.is_some_and(|end| end <= self.now) {

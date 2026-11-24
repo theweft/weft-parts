@@ -18,7 +18,7 @@
 
 use std::time::Duration;
 
-use super::{I2cTarget, Nack, SimTime};
+use super::{Drive, I2cTarget, Nack, NetState, PinDir, SimTime};
 
 /// Default EEPROM write time `T_WRITE`: the datasheet maximum.
 const DEFAULT_EEPROM_WRITE: Duration = Duration::from_millis(50);
@@ -289,6 +289,29 @@ impl Mcp4728 {
 }
 
 impl I2cTarget for Mcp4728 {
+    fn pins(&self) -> &'static [(&'static str, PinDir)] {
+        &[("ldac", PinDir::Input), ("rdy", PinDir::Output)]
+    }
+
+    /// RDY/BSY is open drain: low while programming, released otherwise (datasheet §3.5).
+    fn pin_drive(&self, role: &str) -> Drive {
+        if role == "rdy" && self.busy() {
+            Drive::Low
+        } else {
+            Drive::Released
+        }
+    }
+
+    /// LDAC has no default level: an undefined one keeps the last; the board simulation reports
+    /// the floating input.
+    fn pin_input(&mut self, role: &str, state: NetState) {
+        if role == "ldac"
+            && let Some(high) = state.level()
+        {
+            self.set_ldac(!high);
+        }
+    }
+
     /// @relation(PRT-010, scope=function)
     fn advance(&mut self, now: SimTime) {
         self.now = self.now.max(now);

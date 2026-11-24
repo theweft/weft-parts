@@ -1,2 +1,4 @@
 # Project words the spell checker does not know.
 [default.extend-words]
+# Part number field names in KiCad projects (MFR_PN).
+PN = "PN"

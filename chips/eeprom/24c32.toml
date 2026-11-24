@@ -28,5 +28,6 @@ covers = [
   "page writes wrapping within the 32-byte page",
   "write cycle t_WR (5 ms maximum): address not acknowledged until it ends",
   "WP pin sampled at the stop: protected writes are acknowledged and dropped",
+  "WP read from its net in a board simulation",
 ]
-missing = ["the WP pin on a simulated net (set it through the model for now)"]
+missing = []

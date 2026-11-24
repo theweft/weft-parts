@@ -41,6 +41,18 @@ licenses:
 doc:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
 
+# Checks the KiCad importer against a real export: the official CM5 IO Board (Raspberry Pi
+# design files), exported with kicad-cli. Not part of `ci`: it downloads about 1 GB of KiCad.
+kicad-real:
+    #!/bin/sh
+    set -eu
+    dir=$(mktemp -d)
+    trap 'rm -rf "$dir"' EXIT
+    curl -sSfL -o "$dir/cm5io.zip" "https://pip-assets.raspberrypi.com/categories/1098-design-files/documents/RP-008099-DD-1-CM5%20IO%20Board,%20revision%202,%20KiCAD%20files..zip"
+    mkdir "$dir/src" && (cd "$dir/src" && unzip -q ../cm5io.zip)
+    HOME="$dir" nix shell nixpkgs#kicad-small -c kicad-cli sch export netlist --format kicadsexpr -o "$dir/cm5io.net" "$dir/src/CM5IO.kicad_sch" >/dev/null
+    WEFT_KICAD_NETLIST="$dir/cm5io.net" cargo test --locked --test kicad -- --nocapture
+
 # Validates requirements/*.sdoc and renders requirements, traceability and ReqIF to target/requirements.
 # The coverage gate itself runs as a test (tests/requirements.rs).
 requirements:

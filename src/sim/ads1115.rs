@@ -35,7 +35,7 @@
 
 use std::time::Duration;
 
-use super::{ClockDomain, I2cTarget, Nack, SimTime};
+use super::{ClockDomain, Drive, I2cTarget, Nack, PinDir, SimTime};
 
 const CONVERSION: u8 = 0;
 const CONFIG: u8 = 1;
@@ -450,6 +450,18 @@ impl I2cTarget for Ads1115 {
     fn smbus_alert_answered(&mut self) {
         if self.config & COMP_LAT != 0 {
             self.alert = false;
+        }
+    }
+
+    fn pins(&self) -> &'static [(&'static str, PinDir)] {
+        &[("alert", PinDir::Output)]
+    }
+
+    fn pin_drive(&self, role: &str) -> Drive {
+        if role == "alert" && self.alert_pulls_low() {
+            Drive::Low
+        } else {
+            Drive::Released
         }
     }
 }

@@ -31,5 +31,6 @@ covers = [
   "25 us wake-up from power-down; config changes apply after the running conversion",
   "comparator: traditional and window, queue 1/2/4, latching, polarity, disable",
   "ALERT/RDY as open-drain output, conversion-ready pulse, SMBus alert response",
+  "ALERT/RDY as an open-drain pin on its net in a board simulation",
 ]
-missing = ["the ALERT/RDY pin on a simulated net (read it through the model for now)"]
+missing = ["the input sampled at the exact completion time when it changes between events"]

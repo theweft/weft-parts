@@ -207,3 +207,32 @@ Datasheet DS22187E §5.6.3 and §5.6.4; the Linux driver polls RDY/BSY after sto
 <<<
 
 [[/SECTION]]
+
+[[SECTION]]
+TITLE: Boards and nets
+
+[REQUIREMENT]
+UID: PRT-011
+STATUS: Active
+VERIFICATION: Test
+TITLE: Tool-neutral board model and KiCad netlist import
+STATEMENT: >>>
+The board model shall hold components (part number, value, fields) and the net of every connected pin, with pin names and types where the source has them. The KiCad importer shall read the S-expression netlist of kicad-cli (escaped strings, fields without values, hierarchical net names), take the part number from the first non-empty field among those named, and reject input that is not a netlist.
+<<<
+RATIONALE: >>>
+weft-boardchecker and the simulation read boards the same way; KiCad's netlist adds pin names and types that IPC-2581 lacks (weft-design docs/21 §6).
+<<<
+
+[REQUIREMENT]
+UID: PRT-012
+STATUS: Active
+VERIFICATION: Test
+TITLE: Board simulation on digital nets
+STATEMENT: >>>
+The board simulation shall place a model for every component whose part has one, group components into I2C buses by their SDA and SCL nets, take addresses from the strap wiring, and connect model pins to their nets. Nets shall resolve by wired logic with pulls from resistors to rails, settle after each transfer, model event and external drive, record each change with its time, and report floating inputs, contention and fights against a rail as findings.
+<<<
+RATIONALE: >>>
+Interrupt, ready, load and write-protect lines are part of how firmware uses the chips (weft-design docs/21 §1 to §3).
+<<<
+
+[[/SECTION]]

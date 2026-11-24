@@ -29,8 +29,6 @@ covers = [
   "general call reset (loads EEPROM) and wake-up",
   "output voltage from VDD or the internal reference",
   "EEPROM write time T_WRITE (50 ms maximum): RDY/BSY low, new commands ignored",
+  "LDAC read from and RDY/BSY driven onto their nets in a board simulation",
 ]
-missing = [
-  "write and read address bits commands",
-  "LDAC and RDY/BSY on simulated nets (use the model's methods for now)",
-]
+missing = ["write and read address bits commands"]
