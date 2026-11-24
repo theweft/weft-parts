@@ -36,9 +36,9 @@ checksum = "361a90feb7004eca4019fb28352a9465666b24f840f5c3cddf0ff13920590b89"
 
 [[package]]
 name = "embedded-storage"
-version = "0.3.2"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c815b3ed4213d85d6cfd274b871f430c0681084e28dfd4a537877f47f844ec83"
+checksum = "a21dea9854beb860f3062d10228ce9b976da520a73474aed3171ec276bc0c032"
 
 [[package]]
 name = "equivalent"
@@ -325,6 +325,7 @@ dependencies = [
  "ads1x1x",
  "eeprom24x",
  "embedded-hal",
+ "embedded-storage",
  "mcp4728",
  "nb",
  "serde",

@@ -1,32 +1,45 @@
 // SPDX-FileCopyrightText: 2026 The weft authors
 // SPDX-License-Identifier: MIT
 
-//! Behavioural chip models: what a chip does with the bytes on its bus.
+//! Behavioural chip models: what a chip does with the bytes on its bus, and when.
 //!
 //! A model implements [`I2cTarget`] (or [`SpiTarget`]) at byte level. An [`I2cBus`] routes
 //! transfers to models by address, with the message semantics of Linux `i2c_msg` lists, so the
-//! same models can sit behind a virtio-i2c backend (Linux drivers in QEMU), behind the
+//! same models can sit behind weft-sim's in-guest bus module (Linux drivers in QEMU), behind the
 //! embedded-hal `I2c` trait (Rust MCU drivers in host tests), or in plain unit tests.
 //!
 //! Analog values and pins are set and observed through each model's own methods
 //! (for example [`Ads1115::set_input`] or [`Mcp4728::output_voltage`]).
+//!
+//! # Time
+//!
+//! Models are time-aware but never read a clock: the bus calls [`I2cTarget::advance`] with the
+//! time of every bus event, and the model finishes whatever is due by then (a conversion, an
+//! EEPROM write cycle). The bus takes the time from a [`Clock`]: a [`VirtualClock`] in host tests
+//! (time moves only with bus traffic and driver delays, so runs are deterministic) or a
+//! [`HostClock`] in weft-sim. Each transfer takes as long as its bits at the bus speed
+//! (100 kHz by default), so a driver that polls a busy bit sees the chip finish after the right
+//! amount of virtual time. Models keep their own timing in a [`ClockDomain`].
 
 mod ads1115;
 mod at24;
 #[cfg(feature = "embedded-hal")]
 mod hal;
 mod mcp4728;
+mod time;
 
 use std::any::Any;
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 pub use ads1115::Ads1115;
 pub use at24::At24;
 pub use mcp4728::{Channel as Mcp4728Channel, Mcp4728};
+pub use time::{Clock, ClockDomain, HostClock, SimTime, VirtualClock};
 
 use crate::chip::Sim;
 
-/// The target did not acknowledge (unknown address or rejected byte).
+/// The target did not acknowledge (unknown address, busy, or rejected byte).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Nack;
 
@@ -39,10 +52,28 @@ impl std::fmt::Display for Nack {
 impl std::error::Error for Nack {}
 
 /// An I2C target (peripheral) at byte level.
+///
+/// Before each call the bus calls [`advance`](Self::advance) with the time of that event, so the
+/// other methods act at "now".
 pub trait I2cTarget: Any + Send {
+    /// Time has reached `now` (never earlier than a previous call). Finish whatever is due.
+    fn advance(&mut self, now: SimTime) {
+        let _ = now;
+    }
+    /// The next time the model changes state on its own (a conversion completes, a write cycle
+    /// ends), if any. A scheduler can advance the model then, for example to raise an ALERT pin.
+    fn next_event(&self) -> Option<SimTime> {
+        None
+    }
     /// A start or repeated start addressed to this target; `read` is the R/W bit.
-    fn start(&mut self, read: bool) {
+    /// `Err(Nack)` leaves the address unacknowledged (for example while an EEPROM is busy); the
+    /// transfer then ends without a [`stop`](Self::stop) call to this target.
+    ///
+    /// # Errors
+    /// When the target does not acknowledge its address.
+    fn start(&mut self, read: bool) -> Result<(), Nack> {
         let _ = read;
+        Ok(())
     }
     /// One byte written by the controller. `Err(Nack)` rejects it and ends the transfer.
     ///
@@ -61,6 +92,14 @@ pub trait I2cTarget: Any + Send {
 
 /// An SPI target at byte level. No SPI models exist yet; the trait fixes the shape for them.
 pub trait SpiTarget: Any + Send {
+    /// Time has reached `now`; see [`I2cTarget::advance`].
+    fn advance(&mut self, now: SimTime) {
+        let _ = now;
+    }
+    /// The next time the model changes state on its own; see [`I2cTarget::next_event`].
+    fn next_event(&self) -> Option<SimTime> {
+        None
+    }
     /// Chip select asserted.
     fn select(&mut self) {}
     /// One byte clocked in on MOSI; returns the byte shifted out on MISO.
@@ -85,24 +124,113 @@ pub struct AddressInUse(pub u16);
 /// The general call address.
 pub const GENERAL_CALL: u16 = 0x00;
 
+/// Bits on the wire, in SCL periods: a (repeated) start plus the address byte with its ACK.
+const START_AND_ADDRESS: u64 = 1 + 9;
+/// One data byte with its ACK.
+const BYTE: u64 = 9;
+/// A stop condition.
+const STOP: u64 = 1;
+
+/// Default bus speed: standard mode, as on the Raspberry Pi's `i2c_arm` bus.
+pub const DEFAULT_SPEED_HZ: u64 = 100_000;
+
 /// An I2C bus with models attached by address.
-#[derive(Default)]
+///
+/// Every transfer starts at the clock's current time (or when the previous transfer ended, if
+/// that is later) and lasts as long as its bits at the bus speed: start and address 10 SCL
+/// periods, each data byte 9, stop 1. Setup and hold times and clock stretching are not modelled.
+/// At the end the bus moves the clock to the end of the transfer ([`Clock::advance_to`]).
 pub struct I2cBus {
     targets: BTreeMap<u16, Box<dyn I2cTarget>>,
+    clock: Box<dyn Clock>,
+    scl: ClockDomain,
+    last_end: SimTime,
 }
 
 impl std::fmt::Debug for I2cBus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("I2cBus")
             .field("addresses", &self.targets.keys())
-            .finish()
+            .field("clock", &self.clock)
+            .field("scl", &self.scl)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for I2cBus {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Times events within one transfer: each event's time is computed from the transfer's start, so
+/// rounding does not add up.
+struct Timeline {
+    start: SimTime,
+    scl: ClockDomain,
+    bits: u64,
+}
+
+impl Timeline {
+    fn after(&mut self, bits: u64) -> SimTime {
+        self.bits = self.bits.saturating_add(bits);
+        self.now()
+    }
+
+    fn now(&self) -> SimTime {
+        self.peek(0)
+    }
+
+    /// The time `bits` from now, without moving there.
+    fn peek(&self, bits: u64) -> SimTime {
+        self.start + self.scl.cycles(self.bits.saturating_add(bits))
     }
 }
 
 impl I2cBus {
-    /// An empty bus.
+    /// An empty bus with its own [`VirtualClock`] at 100 kHz.
     pub fn new() -> Self {
-        Self::default()
+        Self::with_clock(VirtualClock::new())
+    }
+
+    /// An empty bus at 100 kHz that takes the time from `clock`. Pass a clone of a
+    /// [`VirtualClock`] to share virtual time with a test or other buses.
+    pub fn with_clock(clock: impl Clock + 'static) -> Self {
+        Self {
+            targets: BTreeMap::new(),
+            clock: Box::new(clock),
+            scl: ClockDomain::nominal(DEFAULT_SPEED_HZ),
+            last_end: SimTime::ZERO,
+        }
+    }
+
+    /// The SCL clock.
+    pub fn speed(&self) -> ClockDomain {
+        self.scl
+    }
+
+    /// Sets the SCL clock, such as 400 kHz fast mode.
+    pub fn set_speed(&mut self, scl: ClockDomain) {
+        self.scl = scl;
+    }
+
+    /// The bus clock's current time.
+    pub fn now(&self) -> SimTime {
+        self.clock.now()
+    }
+
+    /// The earliest [`I2cTarget::next_event`] of all models.
+    pub fn next_event(&self) -> Option<SimTime> {
+        self.targets.values().filter_map(|t| t.next_event()).min()
+    }
+
+    /// Advances every model to the clock's current time, so state changes between transfers
+    /// (a finished conversion) are visible through the models' own methods.
+    pub fn sync(&mut self) {
+        let now = self.clock.now().max(self.last_end);
+        for target in self.targets.values_mut() {
+            target.advance(now);
+        }
     }
 
     /// Attaches a model at `address`.
@@ -133,7 +261,7 @@ impl I2cBus {
     /// start, and a stop follows the last one. Writes to [`GENERAL_CALL`] go to every model.
     ///
     /// # Errors
-    /// [`Nack`] when no model has the address or a model rejects a byte.
+    /// [`Nack`] when no model has the address or a model rejects its address or a byte.
     pub fn transfer(&mut self, address: u16, messages: &mut [Message<'_>]) -> Result<(), Nack> {
         self.run(address, messages, false)
     }
@@ -146,6 +274,25 @@ impl I2cBus {
         messages: &mut [Message<'_>],
         merge_adjacent: bool,
     ) -> Result<(), Nack> {
+        let mut timeline = Timeline {
+            start: self.clock.now().max(self.last_end),
+            scl: self.scl,
+            bits: 0,
+        };
+        let result = self.run_timed(&mut timeline, address, messages, merge_adjacent);
+        let end = timeline.after(STOP);
+        self.last_end = end;
+        self.clock.advance_to(end);
+        result
+    }
+
+    fn run_timed(
+        &mut self,
+        timeline: &mut Timeline,
+        address: u16,
+        messages: &mut [Message<'_>],
+        merge_adjacent: bool,
+    ) -> Result<(), Nack> {
         if address == GENERAL_CALL {
             let mut data = Vec::new();
             for message in messages.iter() {
@@ -154,23 +301,33 @@ impl I2cBus {
                     Message::Read(_) => return Err(Nack),
                 }
             }
+            let bytes = u64::try_from(data.len()).unwrap_or(u64::MAX);
+            let at = timeline.after(START_AND_ADDRESS + bytes.saturating_mul(BYTE));
             for target in self.targets.values_mut() {
+                target.advance(at);
                 target.general_call(&data);
             }
             return Ok(());
         }
-        let target = self.targets.get_mut(&address).ok_or(Nack)?;
+        let Some(target) = self.targets.get_mut(&address) else {
+            timeline.after(START_AND_ADDRESS);
+            return Err(Nack);
+        };
         let mut previous_read: Option<bool> = None;
         let mut result = Ok(());
         'messages: for message in messages.iter_mut() {
             let read = matches!(message, Message::Read(_));
             if !(merge_adjacent && previous_read == Some(read)) {
-                target.start(read);
+                target.advance(timeline.after(START_AND_ADDRESS));
+                // Not addressed: the transfer ends and the target sees no stop.
+                target.start(read)?;
             }
             previous_read = Some(read);
             match message {
                 Message::Write(bytes) => {
                     for byte in *bytes {
+                        // The target acts once the byte is in.
+                        target.advance(timeline.after(BYTE));
                         if let Err(nack) = target.write(*byte) {
                             result = Err(nack);
                             break 'messages;
@@ -179,11 +336,15 @@ impl I2cBus {
                 }
                 Message::Read(buffer) => {
                     for byte in buffer.iter_mut() {
+                        // The target drives the byte from its first bit.
+                        target.advance(timeline.now());
                         *byte = target.read();
+                        timeline.after(BYTE);
                     }
                 }
             }
         }
+        target.advance(timeline.peek(STOP));
         target.stop();
         result
     }
@@ -208,9 +369,12 @@ pub fn build(sim: &Sim) -> Result<Box<dyn I2cTarget>, String> {
         "mcp4728" => Ok(Box::new(Mcp4728::new())),
         "at24" => {
             let (size, page) = (param("size")?, param("page")?);
-            At24::new(size, page)
-                .map(|m| Box::new(m) as Box<dyn I2cTarget>)
-                .ok_or_else(|| format!("at24: size {size} and page {page} must be powers of two, page <= size, size <= 64 KiB"))
+            let mut eeprom = At24::new(size, page).ok_or_else(|| format!("at24: size {size} and page {page} must be powers of two, page <= size, size <= 64 KiB"))?;
+            // Optional: write cycle time t_WR in microseconds (default 5 ms).
+            if let Some(us) = sim.params.get("write_cycle_us") {
+                eeprom.set_write_cycle(Duration::from_micros(*us));
+            }
+            Ok(Box::new(eeprom))
         }
         other => Err(format!(
             "unknown sim model `{other}` (known: {})",

@@ -237,12 +237,13 @@ impl Mcp4728 {
 }
 
 impl I2cTarget for Mcp4728 {
-    fn start(&mut self, read: bool) {
+    fn start(&mut self, read: bool) -> Result<(), Nack> {
         if read {
             self.read_index = 0;
         } else {
             self.command.clear();
         }
+        Ok(())
     }
 
     fn write(&mut self, byte: u8) -> Result<(), Nack> {

@@ -22,9 +22,10 @@ pins = { a0 = "1", a1 = "2", a2 = "3", gnd = "4", sda = "5", scl = "6", wp = "7"
 
 [sim]
 model = "at24"
-params = { size = 4096, page = 32 }
+params = { size = 4096, page = 32, write_cycle_us = 5000 }
 covers = [
   "2-byte memory address, sequential reads wrapping at the end of memory",
   "page writes wrapping within the 32-byte page",
+  "write cycle t_WR (5 ms maximum): address not acknowledged until it ends",
 ]
-missing = ["write cycle time (no NACK while writing)", "the WP pin"]
+missing = ["the WP pin"]

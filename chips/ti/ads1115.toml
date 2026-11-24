@@ -27,5 +27,6 @@ covers = [
   "pointer, conversion, config, lo_thresh and hi_thresh registers with reset values",
   "single-shot (OS bit) and continuous conversion",
   "input multiplexer and programmable gain amplifier",
+  "conversion time 1/DR for every data rate, OS busy while converting, optional rate deviation",
 ]
-missing = ["comparator and the ALERT/RDY pin", "conversion time: conversions complete instantly"]
+missing = ["comparator and the ALERT/RDY pin", "wake-up time from power-down"]

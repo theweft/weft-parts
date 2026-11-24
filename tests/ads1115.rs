@@ -9,28 +9,101 @@
     missing_docs
 )]
 
-use ads1x1x::{Ads1x1x, FullScaleRange, TargetAddr, channel};
-use weft_parts::sim::{Ads1115, I2cBus, Message};
+use std::time::Duration;
 
-fn bus(a0: f64, a1: f64) -> I2cBus {
+use ads1x1x::{Ads1x1x, DataRate16Bit, FullScaleRange, TargetAddr, channel};
+use weft_parts::sim::{Ads1115, Clock, I2cBus, Message, SimTime, VirtualClock};
+
+fn bus_with_clock(a0: f64, a1: f64) -> (I2cBus, VirtualClock) {
     let mut adc = Ads1115::new();
     adc.set_input(0, a0);
     adc.set_input(1, a1);
-    let mut bus = I2cBus::new();
+    let clock = VirtualClock::new();
+    let mut bus = I2cBus::with_clock(clock.clone());
     bus.attach(0x48, Box::new(adc)).unwrap();
-    bus
+    (bus, clock)
 }
+
+fn bus(a0: f64, a1: f64) -> I2cBus {
+    bus_with_clock(a0, a1).0
+}
+
+fn read_register(bus: &mut I2cBus, pointer: u8) -> u16 {
+    let mut value = [0u8; 2];
+    bus.transfer(
+        0x48,
+        &mut [Message::Write(&[pointer]), Message::Read(&mut value)],
+    )
+    .unwrap();
+    u16::from_be_bytes(value)
+}
+
+/// 128 samples per second (the reset DR setting).
+const PERIOD_128: Duration = Duration::from_nanos(7_812_500);
 
 #[test]
 fn one_shot_reads_with_default_gain() {
-    let mut bus = bus(1.0, 0.25);
+    let (mut bus, clock) = bus_with_clock(1.0, 0.25);
     let mut adc = Ads1x1x::new_ads1115(&mut bus, TargetAddr::default());
     // 1.0 V at +-2.048 V full scale: 1.0 / 2.048 * 32768.
     assert_eq!(nb::block!(adc.read(channel::SingleA0)).unwrap(), 16000);
+    // The driver polled OS until the conversion finished: at least one period passed.
+    assert!(clock.now() >= SimTime::ZERO + PERIOD_128);
     assert_eq!(
         nb::block!(adc.read(channel::DifferentialA0A1)).unwrap(),
         12000
     );
+    assert!(clock.now() >= SimTime::ZERO + 2 * PERIOD_128);
+}
+
+#[test]
+fn faster_data_rate_finishes_sooner() {
+    let (mut bus, clock) = bus_with_clock(1.0, 0.0);
+    let mut adc = Ads1x1x::new_ads1115(&mut bus, TargetAddr::default());
+    adc.set_data_rate(DataRate16Bit::Sps860).unwrap();
+    let before = clock.now();
+    assert_eq!(nb::block!(adc.read(channel::SingleA0)).unwrap(), 16000);
+    let took = clock.now().saturating_duration_since(before);
+    // At least 1/860 s = 1.163 ms; the driver's own reads at 100 kHz (about 0.5 ms each) add
+    // the rest, but it stays well below one period at the default 128 SPS.
+    assert!(took >= Duration::from_nanos(1_162_791), "{took:?}");
+    assert!(took < PERIOD_128 / 2, "{took:?}");
+}
+
+#[test]
+fn os_reads_zero_while_converting() {
+    let (mut bus, clock) = bus_with_clock(0.5, 0.0);
+    // Single-shot, AIN0, default gain and 128 SPS, OS = 1: start a conversion.
+    bus.transfer(0x48, &mut [Message::Write(&[0x01, 0xc5, 0x83])])
+        .unwrap();
+    let started = clock.now();
+    assert_eq!(read_register(&mut bus, 0x01) & 0x8000, 0, "converting");
+    assert_eq!(read_register(&mut bus, 0x00), 0, "no result yet");
+    clock.advance_to(started + PERIOD_128);
+    assert_eq!(read_register(&mut bus, 0x01) & 0x8000, 0x8000, "done");
+    assert_eq!(read_register(&mut bus, 0x00), 8000);
+}
+
+#[test]
+fn rate_deviation_moves_the_end_of_a_conversion() {
+    for (ppm, done_after) in [(100_000, 7_102_273), (-100_000, 8_680_556)] {
+        let (mut bus, clock) = bus_with_clock(0.5, 0.0);
+        bus.target_mut::<Ads1115>(0x48)
+            .unwrap()
+            .set_rate_deviation_ppm(ppm);
+        bus.transfer(0x48, &mut [Message::Write(&[0x01, 0xc5, 0x83])])
+            .unwrap();
+        // The conversion starts when the last config byte is in, before the stop bit.
+        let bus_target = bus.target::<Ads1115>(0x48).unwrap();
+        assert_eq!(
+            bus_target.conversion_time(),
+            Duration::from_nanos(done_after),
+            "{ppm} ppm"
+        );
+        let done_at = bus.next_event().unwrap();
+        clock.advance_to(done_at);
+        assert_eq!(read_register(&mut bus, 0x00), 8000, "{ppm} ppm");
+    }
 }
 
 #[test]
@@ -47,21 +120,21 @@ fn gain_changes_scale_and_clamps() {
 
 #[test]
 fn continuous_mode_follows_the_input() {
-    let mut bus = bus(0.5, 0.0);
+    let (mut bus, clock) = bus_with_clock(0.5, 0.0);
     {
         let adc = Ads1x1x::new_ads1115(&mut bus, TargetAddr::default());
         let mut adc = adc.into_continuous().ok().unwrap();
         adc.select_channel(channel::SingleA0).unwrap();
+        assert_eq!(adc.read().unwrap(), 0, "no conversion completed yet");
+        clock.advance(PERIOD_128);
         assert_eq!(adc.read().unwrap(), 8000);
     }
     bus.target_mut::<Ads1115>(0x48).unwrap().set_input(0, -0.5);
-    let mut value = [0u8; 2];
-    bus.transfer(
-        0x48,
-        &mut [Message::Write(&[0x00]), Message::Read(&mut value)],
-    )
-    .unwrap();
-    assert_eq!(i16::from_be_bytes(value), -8000);
+    let old = i16::from_be_bytes(read_register(&mut bus, 0x00).to_be_bytes());
+    assert_eq!(old, 8000, "the last completed conversion");
+    clock.advance(PERIOD_128);
+    let new = i16::from_be_bytes(read_register(&mut bus, 0x00).to_be_bytes());
+    assert_eq!(new, -8000);
 }
 
 #[test]
