@@ -12,12 +12,29 @@
 use mcp4728::{
     Channel, ChannelState, GainMode, MCP4728, OutputEnableMode, PowerDownMode, VoltageReferenceMode,
 };
-use weft_parts::sim::{I2cBus, Mcp4728, Message};
+use std::time::Duration;
+
+use weft_parts::sim::{I2cBus, Mcp4728, Message, VirtualClock};
+
+/// Datasheet maximum EEPROM write time.
+const T_WRITE: Duration = Duration::from_millis(50);
+
+fn bus_with_clock() -> (I2cBus, VirtualClock) {
+    let clock = VirtualClock::new();
+    let mut bus = I2cBus::with_clock(clock.clone());
+    bus.attach(0x60, Box::new(Mcp4728::new())).unwrap();
+    (bus, clock)
+}
 
 fn bus() -> I2cBus {
-    let mut bus = I2cBus::new();
-    bus.attach(0x60, Box::new(Mcp4728::new())).unwrap();
-    bus
+    bus_with_clock().0
+}
+
+fn status(bus: &mut I2cBus) -> u8 {
+    let mut status = [0u8; 3];
+    bus.transfer(0x60, &mut [Message::Read(&mut status)])
+        .unwrap();
+    status[0]
 }
 
 fn model(bus: &I2cBus) -> &Mcp4728 {
@@ -100,7 +117,7 @@ fn output_waits_for_ldac_or_software_update() {
 
 #[test]
 fn eeprom_survives_general_call_reset() {
-    let mut bus = bus();
+    let (mut bus, clock) = bus_with_clock();
     let mut dac = MCP4728::new(&mut bus, 0x60);
     let state = ChannelState {
         value: 100,
@@ -108,12 +125,14 @@ fn eeprom_survives_general_call_reset() {
     };
     dac.single_write(Channel::C, OutputEnableMode::Update, &state)
         .unwrap();
+    clock.advance(T_WRITE);
     dac.fast_write(0, 0, 0, 0).unwrap();
     assert_eq!(dac.read().unwrap().channel_c_input.channel_state.value, 0);
     dac.general_call_reset().unwrap();
     assert_eq!(dac.read().unwrap().channel_c_input.channel_state.value, 100);
 }
 
+/// @relation(PRT-010, scope=function)
 #[test]
 fn linux_driver_transfers() {
     // drivers/iio/dac/mcp4728.c, mcp4728_program_channel_cfg: multi-write, 3 bytes.
@@ -142,11 +161,72 @@ fn linux_driver_transfers() {
         sw.extend(v.to_be_bytes());
     }
     bus.transfer(0x60, &mut [Message::Write(&sw)]).unwrap();
-    let mut status = [0u8; 3];
-    bus.transfer(0x60, &mut [Message::Read(&mut status)])
-        .unwrap();
-    assert_eq!(status[0] & 0x80, 0x80, "RDY");
+    let mut polls = 0;
+    while status(&mut bus) & 0x80 == 0 {
+        polls += 1;
+    }
+    // A 3-byte read is 38 bit times (380 us at 100 kHz): about 50 ms / 380 us polls.
+    assert!((125..=135).contains(&polls), "{polls} polls");
     assert_eq!(model(&bus).eeprom(3).unwrap().value, 4);
+}
+
+/// @relation(PRT-010, scope=function)
+#[test]
+fn commands_during_eeprom_programming_are_ignored() {
+    let (mut bus, clock) = bus_with_clock();
+    let state = ChannelState {
+        value: 700,
+        ..ChannelState::new()
+    };
+    MCP4728::new(&mut bus, 0x60)
+        .single_write(Channel::A, OutputEnableMode::Update, &state)
+        .unwrap();
+    assert!(
+        model(&bus).rdy_pulls_low(),
+        "RDY/BSY pin low while programming"
+    );
+    assert_eq!(status(&mut bus) & 0x80, 0, "RDY bit low");
+    assert_eq!(
+        model(&bus).eeprom(0).unwrap().value,
+        0,
+        "not programmed yet"
+    );
+    // Acknowledged but dropped.
+    MCP4728::new(&mut bus, 0x60).fast_write(1, 2, 3, 4).unwrap();
+    assert_eq!(model(&bus).input(1).unwrap().value, 0);
+    MCP4728::new(&mut bus, 0x60).general_call_reset().unwrap();
+    assert_eq!(
+        model(&bus).input(0).unwrap().value,
+        700,
+        "reset ignored too"
+    );
+
+    clock.advance(T_WRITE);
+    assert_eq!(status(&mut bus) & 0x80, 0x80);
+    assert!(!model(&bus).rdy_pulls_low());
+    assert_eq!(model(&bus).eeprom(0).unwrap().value, 700);
+    MCP4728::new(&mut bus, 0x60).fast_write(1, 2, 3, 4).unwrap();
+    assert_eq!(model(&bus).input(1).unwrap().value, 2);
+}
+
+/// @relation(PRT-010, scope=function)
+#[test]
+fn sequential_write_stopped_early_programs_what_it_got() {
+    let (mut bus, clock) = bus_with_clock();
+    // Sequential write from channel B, but only B and C are sent.
+    let mut sw = vec![(0x0a << 3) | (1 << 1)];
+    for v in [11u16, 22] {
+        sw.extend(v.to_be_bytes());
+    }
+    bus.transfer(0x60, &mut [Message::Write(&sw)]).unwrap();
+    assert!(model(&bus).busy());
+    clock.advance(T_WRITE);
+    bus.sync();
+    assert!(!model(&bus).busy());
+    let eeprom: Vec<u16> = (0..4)
+        .map(|c| model(&bus).eeprom(c).unwrap().value)
+        .collect();
+    assert_eq!(eeprom, [0, 11, 22, 0]);
 }
 
 #[test]

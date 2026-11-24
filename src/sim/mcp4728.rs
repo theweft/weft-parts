@@ -8,8 +8,20 @@
 //! LDAC edge, or on a general call software update. Factory EEPROM is assumed all zeros (VDD
 //! reference, gain 1, normal mode, code 0). Reads past the 24th byte return 0xFF (model choice).
 //! Unsupported commands (address bit write and read) are not acknowledged.
+//!
+//! EEPROM timing (datasheet DS22187E §5.6.3, §5.6.4): a single write starts programming the
+//! EEPROM at the acknowledge of its last byte, a sequential write after the last channel (D, or
+//! the last one sent if the stop comes earlier: model choice). Programming takes `T_WRITE`
+//! (50 ms by default, the datasheet maximum; 25 ms typical). Meanwhile the RDY/BSY bit and the
+//! open-drain RDY/BSY pin are low and every new command, general calls included, is acknowledged
+//! but ignored; reads still work. The EEPROM holds the new values once programming ends.
 
-use super::{I2cTarget, Nack};
+use std::time::Duration;
+
+use super::{I2cTarget, Nack, SimTime};
+
+/// Default EEPROM write time `T_WRITE`: the datasheet maximum.
+const DEFAULT_EEPROM_WRITE: Duration = Duration::from_millis(50);
 
 const INTERNAL_REF: f64 = 2.048;
 
@@ -56,6 +68,14 @@ pub struct Mcp4728 {
     ldac_low: bool,
     command: Vec<u8>,
     read_index: usize,
+    now: SimTime,
+    eeprom_write: Duration,
+    /// End of EEPROM programming, if it runs.
+    busy_until: Option<SimTime>,
+    /// EEPROM values of the current command, programmed once it ends.
+    eeprom_pending: Vec<(usize, Channel)>,
+    /// Commands arriving while busy are acknowledged and dropped.
+    ignoring: bool,
 }
 
 impl Default for Mcp4728 {
@@ -77,6 +97,34 @@ impl Mcp4728 {
             ldac_low: true,
             command: Vec::new(),
             read_index: 0,
+            now: SimTime::ZERO,
+            eeprom_write: DEFAULT_EEPROM_WRITE,
+            busy_until: None,
+            eeprom_pending: Vec::new(),
+            ignoring: false,
+        }
+    }
+
+    /// Sets the EEPROM write time `T_WRITE`.
+    pub fn set_eeprom_write_time(&mut self, t_write: Duration) {
+        self.eeprom_write = t_write;
+    }
+
+    /// Whether the EEPROM is being programmed (RDY/BSY low).
+    pub fn busy(&self) -> bool {
+        self.busy_until.is_some()
+    }
+
+    /// Whether the open-drain RDY/BSY pin pulls its net low (while programming).
+    pub fn rdy_pulls_low(&self) -> bool {
+        self.busy()
+    }
+
+    /// Starts programming the EEPROM with the pending values.
+    /// @relation(PRT-010, scope=function)
+    fn begin_eeprom_write(&mut self) {
+        if !self.eeprom_pending.is_empty() && self.busy_until.is_none() {
+            self.busy_until = Some(self.now + self.eeprom_write);
         }
     }
 
@@ -122,8 +170,8 @@ impl Mcp4728 {
         if let Some(slot) = self.input.get_mut(channel) {
             *slot = value;
         }
-        if eeprom && let Some(slot) = self.eeprom.get_mut(channel) {
-            *slot = value;
+        if eeprom && channel < 4 {
+            self.eeprom_pending.push((channel, value));
         }
         if (update || self.ldac_low)
             && let Some(slot) = self.output.get_mut(channel)
@@ -179,6 +227,9 @@ impl Mcp4728 {
                             first & 1 == 0,
                         );
                     }
+                    if channel == 3 {
+                        self.begin_eeprom_write();
+                    }
                 }
             }
             // Single write to one channel, with EEPROM.
@@ -192,6 +243,7 @@ impl Mcp4728 {
                         true,
                         first & 1 == 0,
                     );
+                    self.begin_eeprom_write();
                 }
             }
             // Select VREF / gain for all channels (bit 3 = A); applies immediately.
@@ -237,18 +289,44 @@ impl Mcp4728 {
 }
 
 impl I2cTarget for Mcp4728 {
+    /// @relation(PRT-010, scope=function)
+    fn advance(&mut self, now: SimTime) {
+        self.now = self.now.max(now);
+        if self.busy_until.is_some_and(|end| end <= self.now) {
+            self.busy_until = None;
+            for (channel, value) in std::mem::take(&mut self.eeprom_pending) {
+                if let Some(slot) = self.eeprom.get_mut(channel) {
+                    *slot = value;
+                }
+            }
+        }
+    }
+
+    fn next_event(&self) -> Option<SimTime> {
+        self.busy_until
+    }
+
     fn start(&mut self, read: bool) -> Result<(), Nack> {
         if read {
             self.read_index = 0;
         } else {
             self.command.clear();
+            self.ignoring = self.busy();
         }
         Ok(())
     }
 
     fn write(&mut self, byte: u8) -> Result<(), Nack> {
+        if self.ignoring {
+            return Ok(());
+        }
         self.command.push(byte);
         self.on_byte()
+    }
+
+    fn stop(&mut self) {
+        // A sequential write that ended before channel D programs what it got.
+        self.begin_eeprom_write();
     }
 
     fn read(&mut self) -> u8 {
@@ -266,14 +344,20 @@ impl I2cTarget for Mcp4728 {
         let c = bank.get(channel).copied().unwrap_or_default();
         let [_, value_low] = c.value.to_be_bytes();
         match index % 3 {
-            // RDY (always ready), POR (powered), channel, address bits.
-            0 => 0x80 | 0x40 | (u8::try_from(channel).unwrap_or(0) << 4) | self.address_bits,
+            // RDY/BSY, POR (powered), channel, address bits.
+            0 => {
+                let ready = if self.busy() { 0 } else { 0x80 };
+                ready | 0x40 | (u8::try_from(channel).unwrap_or(0) << 4) | self.address_bits
+            }
             1 => c.high_byte(),
             _ => value_low,
         }
     }
 
     fn general_call(&mut self, data: &[u8]) {
+        if self.busy() {
+            return;
+        }
         match data.first() {
             // Reset: load EEPROM into input and output registers.
             Some(0x06) => {

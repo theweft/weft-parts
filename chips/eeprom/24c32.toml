@@ -27,5 +27,6 @@ covers = [
   "2-byte memory address, sequential reads wrapping at the end of memory",
   "page writes wrapping within the 32-byte page",
   "write cycle t_WR (5 ms maximum): address not acknowledged until it ends",
+  "WP pin sampled at the stop: protected writes are acknowledged and dropped",
 ]
-missing = ["the WP pin"]
+missing = ["the WP pin on a simulated net (set it through the model for now)"]

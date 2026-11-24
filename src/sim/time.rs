@@ -205,6 +205,7 @@ impl ClockDomain {
     }
 
     /// The time `n` cycles take.
+    /// @relation(PRT-006, scope=function)
     pub fn cycles(&self, n: u64) -> Duration {
         // n / (hz * (1 + ppm/1e6)) seconds = n * 1e15 / micro_hz nanoseconds, rounded up.
         let ns = (u128::from(n) * 1_000_000_000_000_000).div_ceil(self.micro_hz());
@@ -212,6 +213,7 @@ impl ClockDomain {
     }
 
     /// Complete cycles within `d`: the largest `n` with `cycles(n) <= d`.
+    /// @relation(PRT-006, scope=function)
     pub fn cycles_in(&self, d: Duration) -> u64 {
         let n = d.as_nanos() * self.micro_hz() / 1_000_000_000_000_000;
         u64::try_from(n).unwrap_or(u64::MAX)

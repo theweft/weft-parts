@@ -45,6 +45,7 @@ fn bytes_and_pages_round_trip() {
     assert_eq!(data, [0xff, 1, 2, 3, 4, 0xff]);
 }
 
+/// @relation(PRT-004, scope=function)
 #[test]
 fn storage_waits_out_each_page_with_the_virtual_clock() {
     let (mut bus, clock) = bus_with_clock();
@@ -59,6 +60,7 @@ fn storage_waits_out_each_page_with_the_virtual_clock() {
     assert!(clock.now().as_nanos() >= 4 * 5_000_000);
 }
 
+/// @relation(PRT-009, scope=function)
 #[test]
 fn acknowledge_polling_ends_with_the_write_cycle() {
     let (mut bus, clock) = bus_with_clock();
@@ -110,4 +112,22 @@ fn sequential_read_wraps_at_the_end() {
     )
     .unwrap();
     assert_eq!(data, [0xff, 0x42]);
+}
+
+/// @relation(PRT-009, scope=function)
+#[test]
+fn write_protect_acknowledges_but_writes_nothing() {
+    let (mut bus, clock) = bus_with_clock();
+    bus.target_mut::<At24>(0x50).unwrap().set_wp(true);
+    bus.transfer(0x50, &mut [Message::Write(&[0x00, 0x08, 0x11, 0x22])])
+        .unwrap();
+    let eeprom = bus.target::<At24>(0x50).unwrap();
+    assert!(!eeprom.busy(), "no write cycle");
+    assert_eq!(&eeprom.memory()[8..10], &[0xff, 0xff]);
+    // WP is sampled at the stop: releasing it afterwards changes nothing, the next write works.
+    bus.target_mut::<At24>(0x50).unwrap().set_wp(false);
+    bus.transfer(0x50, &mut [Message::Write(&[0x00, 0x08, 0x33])])
+        .unwrap();
+    clock.advance(T_WR);
+    assert_eq!(bus.target::<At24>(0x50).unwrap().memory()[8], 0x33);
 }

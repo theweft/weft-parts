@@ -11,9 +11,11 @@
 
 use std::time::Duration;
 
+use embedded_hal::i2c::{Error as _, ErrorKind, NoAcknowledgeSource};
 use embedded_hal::i2c::{I2c, Operation};
 use weft_parts::sim::{
-    AddressInUse, At24, Clock, ClockDomain, I2cBus, Message, Nack, SimTime, VirtualClock,
+    ALERT_RESPONSE, AddressInUse, At24, Clock, ClockDomain, I2cBus, Message, Nack, SimTime,
+    VirtualClock,
 };
 
 #[test]
@@ -28,6 +30,7 @@ fn address_conflicts_and_unknown_targets() {
     assert_eq!(bus.transfer(0x51, &mut [Message::Write(&[0])]), Err(Nack));
 }
 
+/// @relation(PRT-002, scope=function)
 #[test]
 fn embedded_hal_adjacent_writes_are_one_message() {
     let mut bus = I2cBus::new();
@@ -54,6 +57,7 @@ fn embedded_hal_adjacent_writes_are_one_message() {
     assert_eq!(bus.target::<At24>(0x50).unwrap().memory()[0x11], 0xff);
 }
 
+/// @relation(PRT-005, scope=function)
 #[test]
 fn transfers_take_their_bit_time_and_move_the_clock() {
     let clock = VirtualClock::new();
@@ -80,6 +84,7 @@ fn transfers_take_their_bit_time_and_move_the_clock() {
     );
 }
 
+/// @relation(PRT-004, scope=function)
 #[test]
 fn a_transfer_never_starts_before_the_previous_one_ended() {
     // A clock that stands still (like real time between two quick transfers).
@@ -103,6 +108,43 @@ fn a_transfer_never_starts_before_the_previous_one_ended() {
     let mut data = [0u8; 1];
     assert_eq!(
         bus.transfer(0x50, &mut [Message::Read(&mut data)]),
+        Err(Nack)
+    );
+}
+
+/// @relation(PRT-003, scope=function)
+#[test]
+fn embedded_hal_says_which_byte_was_not_acknowledged() {
+    let mut bus = I2cBus::new();
+    bus.attach(0x60, Box::new(weft_parts::sim::Mcp4728::new()))
+        .unwrap();
+    let kind = |e: weft_parts::sim::HalNack| e.kind();
+    let missing = bus.write(0x61, &[0]).unwrap_err();
+    assert_eq!(
+        kind(missing),
+        ErrorKind::NoAcknowledge(NoAcknowledgeSource::Address)
+    );
+    // Write address bits (0b011...) is not modelled: the command byte is rejected.
+    let rejected = bus.write(0x60, &[0x61, 0x66, 0x6f]).unwrap_err();
+    assert_eq!(
+        kind(rejected),
+        ErrorKind::NoAcknowledge(NoAcknowledgeSource::Data)
+    );
+    assert!(!rejected.address());
+}
+
+/// @relation(PRT-002, scope=function)
+#[test]
+fn alert_response_address_is_reserved() {
+    let mut bus = I2cBus::new();
+    assert_eq!(
+        bus.attach(ALERT_RESPONSE, Box::new(At24::new(4096, 32).unwrap())),
+        Err(AddressInUse(ALERT_RESPONSE))
+    );
+    // Nobody alerting: the response is not acknowledged.
+    let mut byte = [0u8; 1];
+    assert_eq!(
+        bus.transfer(ALERT_RESPONSE, &mut [Message::Read(&mut byte)]),
         Err(Nack)
     );
 }

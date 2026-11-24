@@ -15,6 +15,7 @@ use std::path::Path;
 use weft_parts::library::BUILTIN;
 use weft_parts::{Address, Library};
 
+/// @relation(PRT-001, scope=function)
 #[test]
 fn builtin_loads_without_overlaps() {
     let library = Library::builtin().unwrap();
@@ -123,6 +124,7 @@ fn problems(toml: &str) -> String {
         .to_string()
 }
 
+/// @relation(PRT-001, scope=function)
 #[test]
 fn rejects_inconsistent_chips() {
     let base = |extra: &str| {

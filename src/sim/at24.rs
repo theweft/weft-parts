@@ -10,6 +10,10 @@
 //! condition. Until it ends (`t_WR`, 5 ms by default: the 24LC32A datasheet maximum),
 //! the chip does not acknowledge its address, which is what drivers poll for. An address-only
 //! write (the first half of a random read) starts no cycle. The model always takes the full `t_WR`.
+//!
+//! Write protect: the WP pin is sampled at the stop condition of every write. When it is high the
+//! chip acknowledges everything but writes nothing and starts no cycle (24LC32A datasheet §6.3).
+//! Data therefore reaches the memory only at the stop.
 
 use std::time::Duration;
 
@@ -29,6 +33,9 @@ pub struct At24 {
     now: SimTime,
     /// End of the running write cycle, if one runs.
     busy_until: Option<SimTime>,
+    /// Data bytes of the current write, applied at the stop unless write-protected.
+    staged: Vec<(usize, u8)>,
+    wp_high: bool,
 }
 
 impl At24 {
@@ -44,12 +51,19 @@ impl At24 {
             write_cycle: DEFAULT_WRITE_CYCLE,
             now: SimTime::ZERO,
             busy_until: None,
+            staged: Vec::new(),
+            wp_high: false,
         })
     }
 
     /// Sets the write cycle time `t_WR`.
     pub fn set_write_cycle(&mut self, t_wr: Duration) {
         self.write_cycle = t_wr;
+    }
+
+    /// Drives the WP pin: high write-protects the whole array (sampled at each write's stop).
+    pub fn set_wp(&mut self, high: bool) {
+        self.wp_high = high;
     }
 
     /// Whether an internal write cycle is running.
@@ -84,12 +98,14 @@ impl I2cTarget for At24 {
         self.busy_until
     }
 
+    /// @relation(PRT-009, scope=function)
     fn start(&mut self, read: bool) -> Result<(), Nack> {
         if self.busy() {
             return Err(Nack);
         }
         if !read {
             self.write_index = 0;
+            self.staged.clear();
         }
         Ok(())
     }
@@ -99,9 +115,7 @@ impl I2cTarget for At24 {
             0 => self.pointer = (usize::from(byte) << 8) & self.mask(),
             1 => self.pointer = (self.pointer | usize::from(byte)) & self.mask(),
             _ => {
-                if let Some(cell) = self.memory.get_mut(self.pointer) {
-                    *cell = byte;
-                }
+                self.staged.push((self.pointer, byte));
                 let base = self.pointer & !(self.page - 1);
                 self.pointer = base | ((self.pointer + 1) & (self.page - 1));
             }
@@ -116,8 +130,15 @@ impl I2cTarget for At24 {
         byte
     }
 
+    /// @relation(PRT-009, scope=function)
     fn stop(&mut self) {
-        if self.write_index > 2 {
+        let staged = std::mem::take(&mut self.staged);
+        if self.write_index > 2 && !self.wp_high {
+            for (address, byte) in staged {
+                if let Some(cell) = self.memory.get_mut(address) {
+                    *cell = byte;
+                }
+            }
             self.busy_until = Some(self.now + self.write_cycle);
         }
         self.write_index = 0;

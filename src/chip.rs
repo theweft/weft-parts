@@ -150,6 +150,7 @@ const LEVELS: [&str; 2] = ["gnd", "vdd"];
 
 impl Chip {
     /// Consistency problems, as sentences. Empty means valid.
+    /// @relation(PRT-001, scope=function)
     pub fn problems(&self) -> Vec<String> {
         let mut out = Vec::new();
         if self.package.is_empty() {

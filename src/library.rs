@@ -108,6 +108,7 @@ impl Library {
     }
 
     /// Part number prefixes claimed by more than one package, with their claimants.
+    /// @relation(PRT-001, scope=function)
     pub fn overlaps(&self) -> BTreeMap<String, Vec<String>> {
         let mut seen: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for (_, chip) in &self.chips {

@@ -34,6 +34,8 @@ use std::time::Duration;
 
 pub use ads1115::Ads1115;
 pub use at24::At24;
+#[cfg(feature = "embedded-hal")]
+pub use hal::HalNack;
 pub use mcp4728::{Channel as Mcp4728Channel, Mcp4728};
 pub use time::{Clock, ClockDomain, HostClock, SimTime, VirtualClock};
 
@@ -88,6 +90,13 @@ pub trait I2cTarget: Any + Send {
     fn general_call(&mut self, data: &[u8]) {
         let _ = data;
     }
+    /// Whether this target is asserting an SMBus alert, with the status bit it sends in an
+    /// alert response (the least significant bit after its address). `None` when not alerting.
+    fn smbus_alert(&self) -> Option<bool> {
+        None
+    }
+    /// This target won an SMBus alert response; it clears a latched alert.
+    fn smbus_alert_answered(&mut self) {}
 }
 
 /// An SPI target at byte level. No SPI models exist yet; the trait fixes the shape for them.
@@ -123,6 +132,19 @@ pub struct AddressInUse(pub u16);
 
 /// The general call address.
 pub const GENERAL_CALL: u16 = 0x00;
+
+/// The SMBus alert response address. A read from it returns the address of the alerting target
+/// with the lowest address (shifted left, status bit in bit 0), which then clears its alert.
+pub const ALERT_RESPONSE: u16 = 0x0c;
+
+/// Which part of a transfer was not acknowledged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Nacked {
+    /// The address (no target there, or the target is busy).
+    Address,
+    /// A data byte.
+    Data,
+}
 
 /// Bits on the wire, in SCL periods: a (repeated) start plus the address byte with its ACK.
 const START_AND_ADDRESS: u64 = 1 + 9;
@@ -195,6 +217,7 @@ impl I2cBus {
 
     /// An empty bus at 100 kHz that takes the time from `clock`. Pass a clone of a
     /// [`VirtualClock`] to share virtual time with a test or other buses.
+    /// @relation(PRT-004, scope=function)
     pub fn with_clock(clock: impl Clock + 'static) -> Self {
         Self {
             targets: BTreeMap::new(),
@@ -238,7 +261,10 @@ impl I2cBus {
     /// # Errors
     /// When another model already uses the address.
     pub fn attach(&mut self, address: u16, target: Box<dyn I2cTarget>) -> Result<(), AddressInUse> {
-        if address == GENERAL_CALL || self.targets.contains_key(&address) {
+        if address == GENERAL_CALL
+            || address == ALERT_RESPONSE
+            || self.targets.contains_key(&address)
+        {
             return Err(AddressInUse(address));
         }
         self.targets.insert(address, target);
@@ -258,22 +284,25 @@ impl I2cBus {
     }
 
     /// Runs a transfer with Linux `i2c_msg` semantics: every message begins with a (repeated)
-    /// start, and a stop follows the last one. Writes to [`GENERAL_CALL`] go to every model.
+    /// start, and a stop follows the last one. Writes to [`GENERAL_CALL`] go to every model; a
+    /// one-byte read from [`ALERT_RESPONSE`] answers an SMBus alert.
     ///
     /// # Errors
     /// [`Nack`] when no model has the address or a model rejects its address or a byte.
+    /// @relation(PRT-002, scope=function)
     pub fn transfer(&mut self, address: u16, messages: &mut [Message<'_>]) -> Result<(), Nack> {
-        self.run(address, messages, false)
+        self.run(address, messages, false).map_err(|_| Nack)
     }
 
     /// Runs a transfer where adjacent messages of the same direction continue each other without
     /// a repeated start (embedded-hal `transaction` semantics).
+    /// @relation(PRT-005, scope=function)
     pub(crate) fn run(
         &mut self,
         address: u16,
         messages: &mut [Message<'_>],
         merge_adjacent: bool,
-    ) -> Result<(), Nack> {
+    ) -> Result<(), Nacked> {
         let mut timeline = Timeline {
             start: self.clock.now().max(self.last_end),
             scl: self.scl,
@@ -286,19 +315,23 @@ impl I2cBus {
         result
     }
 
+    /// @relation(PRT-004, scope=function)
     fn run_timed(
         &mut self,
         timeline: &mut Timeline,
         address: u16,
         messages: &mut [Message<'_>],
         merge_adjacent: bool,
-    ) -> Result<(), Nack> {
+    ) -> Result<(), Nacked> {
+        if address == ALERT_RESPONSE {
+            return self.alert_response(timeline, messages);
+        }
         if address == GENERAL_CALL {
             let mut data = Vec::new();
             for message in messages.iter() {
                 match message {
                     Message::Write(bytes) => data.extend_from_slice(bytes),
-                    Message::Read(_) => return Err(Nack),
+                    Message::Read(_) => return Err(Nacked::Address),
                 }
             }
             let bytes = u64::try_from(data.len()).unwrap_or(u64::MAX);
@@ -311,7 +344,7 @@ impl I2cBus {
         }
         let Some(target) = self.targets.get_mut(&address) else {
             timeline.after(START_AND_ADDRESS);
-            return Err(Nack);
+            return Err(Nacked::Address);
         };
         let mut previous_read: Option<bool> = None;
         let mut result = Ok(());
@@ -320,7 +353,7 @@ impl I2cBus {
             if !(merge_adjacent && previous_read == Some(read)) {
                 target.advance(timeline.after(START_AND_ADDRESS));
                 // Not addressed: the transfer ends and the target sees no stop.
-                target.start(read)?;
+                target.start(read).map_err(|_| Nacked::Address)?;
             }
             previous_read = Some(read);
             match message {
@@ -328,8 +361,8 @@ impl I2cBus {
                     for byte in *bytes {
                         // The target acts once the byte is in.
                         target.advance(timeline.after(BYTE));
-                        if let Err(nack) = target.write(*byte) {
-                            result = Err(nack);
+                        if target.write(*byte).is_err() {
+                            result = Err(Nacked::Data);
                             break 'messages;
                         }
                     }
@@ -347,6 +380,36 @@ impl I2cBus {
         target.advance(timeline.peek(STOP));
         target.stop();
         result
+    }
+
+    /// SMBus alert response: one read message; every alerting target competes and the lowest
+    /// address wins arbitration, as on the wire.
+    /// @relation(PRT-002, scope=function)
+    fn alert_response(
+        &mut self,
+        timeline: &mut Timeline,
+        messages: &mut [Message<'_>],
+    ) -> Result<(), Nacked> {
+        let at = timeline.after(START_AND_ADDRESS);
+        for target in self.targets.values_mut() {
+            target.advance(at);
+        }
+        let winner = self
+            .targets
+            .iter()
+            .find_map(|(address, t)| t.smbus_alert().map(|status| (*address, status)));
+        let (Some((address, status)), [Message::Read(buffer)]) = (winner, messages) else {
+            return Err(Nacked::Address);
+        };
+        let byte = u8::try_from(address << 1).unwrap_or(0xfe) | u8::from(status);
+        for slot in buffer.iter_mut() {
+            *slot = byte;
+            timeline.after(BYTE);
+        }
+        if let Some(target) = self.targets.get_mut(&address) {
+            target.smbus_alert_answered();
+        }
+        Ok(())
     }
 }
 

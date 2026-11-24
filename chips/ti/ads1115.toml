@@ -28,5 +28,8 @@ covers = [
   "single-shot (OS bit) and continuous conversion",
   "input multiplexer and programmable gain amplifier",
   "conversion time 1/DR for every data rate, OS busy while converting, optional rate deviation",
+  "25 us wake-up from power-down; config changes apply after the running conversion",
+  "comparator: traditional and window, queue 1/2/4, latching, polarity, disable",
+  "ALERT/RDY as open-drain output, conversion-ready pulse, SMBus alert response",
 ]
-missing = ["comparator and the ALERT/RDY pin", "wake-up time from power-down"]
+missing = ["the ALERT/RDY pin on a simulated net (read it through the model for now)"]

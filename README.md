@@ -19,9 +19,9 @@ takes, and expose analog inputs and outputs to the test. They do not model elect
 
 | Chip | Packages | Model covers | Model does not cover |
 |---|---|---|---|
-| TI ADS1115 ADC | VSSOP-10 | registers, single-shot and continuous conversion, MUX, PGA, conversion time 1/DR with optional rate deviation | comparator/ALERT, wake-up time |
-| Microchip MCP4728 DAC | MSOP-10 | all write commands except address bits, register read, LDAC/UDAC/general call, output voltage | address bit commands, EEPROM write time |
-| 24C32 EEPROM | 8-pin SOIC/TSSOP/MSOP/DIP | addressing, page writes, sequential reads, write cycle (NACK until t_WR ends) | WP pin |
+| TI ADS1115 ADC | VSSOP-10 | registers, single-shot and continuous conversion, MUX, PGA, conversion time 1/DR with optional rate deviation, wake-up, comparator and ALERT/RDY (including SMBus alert response) | pins on simulated nets |
+| Microchip MCP4728 DAC | MSOP-10 | all write commands except address bits, register read, LDAC/UDAC/general call, output voltage, EEPROM write time with RDY/BSY | address bit commands, pins on simulated nets |
+| 24C32 EEPROM | 8-pin SOIC/TSSOP/MSOP/DIP | addressing, page writes, sequential reads, write cycle (NACK until t_WR ends), WP pin | pins on simulated nets |
 
 Each model is tested with an independent open-source Rust driver for the chip (`ads1x1x`,
 `mcp4728`, `eeprom24x`) and with the byte sequences the Linux driver sends.
@@ -103,6 +103,12 @@ assert!(bus.transfer(0x50, &mut [Message::Write(&[])]).is_err()); // busy for t_
 clock.advance(Duration::from_millis(5));
 assert!(bus.transfer(0x50, &mut [Message::Write(&[])]).is_ok());
 ```
+
+Pins that are not on the bus (ALERT/RDY, RDY/BSY, LDAC, WP) are read and driven through each
+model's methods (`alert_pulls_low`, `rdy_pulls_low`, `set_ldac`, `set_wp`) until simulated nets
+exist (weft-design docs/21). A read from the SMBus alert response address (`ALERT_RESPONSE`)
+returns the lowest alerting address, as on the wire. Through embedded-hal, errors say whether the
+address or a data byte was not acknowledged.
 
 Each model keeps its own timing in a `ClockDomain` (its oscillator, conversion rate or SCL), with
 an optional deviation in ppm so datasheet tolerances can be tested. Edges are computed from a

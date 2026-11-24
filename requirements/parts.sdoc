@@ -1,0 +1,209 @@
+[DOCUMENT]
+TITLE: weft-parts requirements
+VERSION: 0.1 (draft)
+OPTIONS:
+  MARKUP: Text
+
+[GRAMMAR]
+ELEMENTS:
+- TAG: SECTION
+  PROPERTIES:
+    IS_COMPOSITE: True
+  FIELDS:
+  - TITLE: UID
+    TYPE: String
+    REQUIRED: False
+  - TITLE: TITLE
+    TYPE: String
+    REQUIRED: True
+- TAG: TEXT
+  FIELDS:
+  - TITLE: UID
+    TYPE: String
+    REQUIRED: False
+  - TITLE: STATEMENT
+    TYPE: String
+    REQUIRED: True
+- TAG: REQUIREMENT
+  FIELDS:
+  - TITLE: UID
+    TYPE: String
+    REQUIRED: True
+  - TITLE: STATUS
+    TYPE: SingleChoice(Draft, Active, Deleted)
+    REQUIRED: True
+  - TITLE: VERIFICATION
+    TYPE: SingleChoice(Test, Analysis, Inspection, Demonstration)
+    REQUIRED: True
+  - TITLE: TITLE
+    TYPE: String
+    REQUIRED: True
+  - TITLE: STATEMENT
+    TYPE: String
+    REQUIRED: True
+  - TITLE: RATIONALE
+    TYPE: String
+    REQUIRED: False
+  - TITLE: SATISFIES
+    HUMAN_TITLE: Satisfies (system requirements, weft-design)
+    TYPE: String
+    REQUIRED: False
+  - TITLE: STANDARDS
+    HUMAN_TITLE: Standards (draft mapping)
+    TYPE: String
+    REQUIRED: False
+  - TITLE: FACTS
+    HUMAN_TITLE: Facts (facts.toml in the design repository)
+    TYPE: String
+    REQUIRED: False
+  RELATIONS:
+  - TYPE: Parent
+  - TYPE: File
+
+[TEXT]
+STATEMENT: >>>
+Component requirements of weft-parts: chip data and behavioural chip models. Each requirement is traced to the code that implements it and to the tests that verify it by @relation markers in src/ and tests/. The gate in tests/requirements.rs fails when an Active requirement verified by Test has no implementation or no test reference, or when a marker names an unknown requirement.
+
+weft-parts is development and test tooling: it does not run on devices and refines no system requirement, so SATISFIES is empty. Design: weft-design docs/04-decisions.md (Board simulation, Time in the models) and docs/21-pins-and-nets.md.
+<<<
+
+[[SECTION]]
+TITLE: Chip data
+
+[REQUIREMENT]
+UID: PRT-001
+STATUS: Active
+VERIFICATION: Test
+TITLE: Validated chip files
+STATEMENT: >>>
+Loading a chip file shall fail unless its bus pins exist in every package, its address and GPIO pin roles exist, its strap levels are gnd, vdd or a pin role, its compatibles look like vendor,device and its model exists; part number prefixes shall not overlap between chips.
+<<<
+RATIONALE: >>>
+The board checker and the simulation trust the data; errors must surface when the file is added, not when a board is checked.
+<<<
+
+[[/SECTION]]
+
+[[SECTION]]
+TITLE: Bus
+
+[REQUIREMENT]
+UID: PRT-002
+STATUS: Active
+VERIFICATION: Test
+TITLE: Transfer semantics
+STATEMENT: >>>
+The I2C bus shall run transfers with Linux i2c_msg semantics (a repeated start before every message, one stop at the end) and embedded-hal transaction semantics (adjacent operations of the same direction without a repeated start), route them by address, deliver general calls to every model and answer the SMBus alert response address with the lowest alerting address.
+<<<
+RATIONALE: >>>
+The same models serve Linux drivers (weft-sim) and Rust MCU drivers (embedded-hal); both must see what hardware would do.
+<<<
+
+[REQUIREMENT]
+UID: PRT-003
+STATUS: Active
+VERIFICATION: Test
+TITLE: NACK source
+STATEMENT: >>>
+Through embedded-hal, a failed transfer shall report whether the address or a data byte was not acknowledged.
+<<<
+RATIONALE: >>>
+Drivers treat a busy chip (address NACK) differently from a rejected command (data NACK).
+<<<
+
+[[/SECTION]]
+
+[[SECTION]]
+TITLE: Time
+
+[REQUIREMENT]
+UID: PRT-004
+STATUS: Active
+VERIFICATION: Test
+TITLE: Caller-owned time
+STATEMENT: >>>
+Models shall never read a clock. The bus shall tell each model the time of every bus event, taken from a clock the caller chooses: a virtual clock that moves only with bus traffic and driver delays, or the host's monotonic clock. Time shall never go backwards for a model.
+<<<
+RATIONALE: >>>
+The same model then runs deterministically in host tests and on real time inside a hypervisor guest, and later in loosely timed co-simulation.
+<<<
+
+[REQUIREMENT]
+UID: PRT-005
+STATUS: Active
+VERIFICATION: Test
+TITLE: Bus bit timing
+STATEMENT: >>>
+Every transfer shall last as long as its bits at the bus speed (start and address 10 SCL periods, each data byte 9, stop 1), shall start no earlier than the previous transfer ended, and shall move a virtual clock to its end.
+<<<
+RATIONALE: >>>
+Drivers that poll a busy bit must see a chip finish after the right amount of time.
+<<<
+
+[REQUIREMENT]
+UID: PRT-006
+STATUS: Active
+VERIFICATION: Test
+TITLE: Clock domains without drift
+STATEMENT: >>>
+A clock domain shall convert cycles to time from a fixed origin with an optional deviation in ppm, rounding edges up to the next nanosecond, so that cycles_in(cycles(n)) = n and long runs do not drift.
+<<<
+RATIONALE: >>>
+Datasheet tolerances become test parameters, and conversions at rates without a whole-nanosecond period stay exact.
+<<<
+
+[[/SECTION]]
+
+[[SECTION]]
+TITLE: Chip models
+
+[REQUIREMENT]
+UID: PRT-007
+STATUS: Active
+VERIFICATION: Test
+TITLE: ADS1115 conversion timing
+STATEMENT: >>>
+The ADS1115 model shall take 1/DR per conversion (with an optional rate deviation), add the 25 us wake-up from power-down, read OS as 0 while converting, keep the last completed result in the conversion register, and apply a config write during a conversion only from the next conversion.
+<<<
+RATIONALE: >>>
+Datasheet SBAS444E §7.4.2; drivers poll OS or sleep for the conversion time.
+<<<
+
+[REQUIREMENT]
+UID: PRT-008
+STATUS: Active
+VERIFICATION: Test
+TITLE: ADS1115 comparator and ALERT/RDY
+STATEMENT: >>>
+The ADS1115 model shall implement the traditional and window comparator with queue 1, 2 or 4, latching (cleared by reading the conversion register or an SMBus alert response), polarity and disable, and the conversion-ready mode with an 8 us pulse in continuous mode; ALERT/RDY shall be an open-drain output.
+<<<
+RATIONALE: >>>
+Datasheet SBAS444E §7.3.7 to §7.3.9; threshold interrupts are a common use of the chip.
+<<<
+
+[REQUIREMENT]
+UID: PRT-009
+STATUS: Active
+VERIFICATION: Test
+TITLE: 24C32 write cycle and write protect
+STATEMENT: >>>
+The 24C32 model shall leave its address unacknowledged during the write cycle t_WR that a write with data starts at its stop, and shall acknowledge but drop writes while WP is high at the stop.
+<<<
+RATIONALE: >>>
+24LC32A datasheet; drivers poll for the acknowledge, and WP protects HAT ID EEPROMs.
+<<<
+FACTS: sim.at24_write_cycle_ms
+
+[REQUIREMENT]
+UID: PRT-010
+STATUS: Active
+VERIFICATION: Test
+TITLE: MCP4728 EEPROM programming
+STATEMENT: >>>
+The MCP4728 model shall take T_WRITE to program its EEPROM after a single or sequential write, report busy through the RDY/BSY bit and pin meanwhile, acknowledge but ignore new commands (general calls included) until programming ends, and hold the new EEPROM values only afterwards.
+<<<
+RATIONALE: >>>
+Datasheet DS22187E §5.6.3 and §5.6.4; the Linux driver polls RDY/BSY after storing to EEPROM.
+<<<
+
+[[/SECTION]]
